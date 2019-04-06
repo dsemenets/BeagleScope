@@ -23,13 +23,16 @@
 #include <linux/kfifo.h>
 #include <linux/uaccess.h>
 #include <linux/poll.h>
+#include <linux/rpmsg/virtio_rpmsg.h>
 
 #define PRU_MAX_DEVICES 4
 #define DRIVER_BUF_SIZE 1
+#define CHANNEL_NAME "pru_channel"
 
 struct rpmsg_pru_parallel_example_dev {
-	struct rpmsg_channel *rpmsg_dev;
+	struct rpmsg_device *rpmsg_dev;
 	struct device *dev;
+	struct rpmsg_endpoint *endpoint;
 	bool dev_lock;
 	bool buf_lock;
 	struct cdev cdev;
@@ -41,18 +44,29 @@ static dev_t rpmsg_pru_parallel_example_devt;
 
 static DEFINE_IDR(rpmsg_pru_parallel_example_minors);
 
-
+static int rpmsg_pru_parallel_example_cb(struct rpmsg_device *rpmsg_dev,
+					  void *data , int len , void *priv,
+					  u32 src );
 
 static int rpmsg_pru_parallel_example_open(struct inode *inode,
 					   struct file *filp)
 {
 	int ret = -EACCES;
 	struct rpmsg_pru_parallel_example_dev *pp_example_dev;
+	struct rpmsg_endpoint *endpoint;
+	struct rpmsg_channel_info chinfo;                                                                                                 
+
+	strncpy(chinfo.name, CHANNEL_NAME, sizeof(chinfo.name));
+	chinfo.src = RPMSG_ADDR_ANY;
+	chinfo.dst = RPMSG_ADDR_ANY;
 
 	pp_example_dev = container_of(inode->i_cdev,
 				      struct rpmsg_pru_parallel_example_dev,
 				      cdev);
+	endpoint = rpmsg_create_ept(pp_example_dev->rpmsg_dev,
+				rpmsg_pru_parallel_example_cb, NULL, chinfo);
 
+	pp_example_dev->endpoint = endpoint;
 	if (!pp_example_dev->dev_lock) {
 		pp_example_dev->dev_lock = true;
 		filp->private_data = pp_example_dev;
@@ -72,11 +86,11 @@ static ssize_t rpmsg_pru_parallel_example_write(struct file *filp,
 						size_t count, loff_t *f_ops)
 {
 	int ret;
-	static char driver_buf[DRIVER_BUF_SIZE];
+	static char driver_buf[DRIVER_BUF_SIZE+1];
 	struct rpmsg_pru_parallel_example_dev *pp_example_dev;
 
 	pp_example_dev = filp->private_data;
-
+	dev_err(pp_example_dev->dev, "%s\n", __func__);
 	if (!pp_example_dev->buf_lock){
 
 		if (count > DRIVER_BUF_SIZE - sizeof(struct rpmsg_hdr)) {
@@ -84,13 +98,14 @@ static ssize_t rpmsg_pru_parallel_example_write(struct file *filp,
 			return -EINVAL;
 		}
 
-		if (copy_from_user(driver_buf, buf, count)) {
+		if (copy_from_user(driver_buf, buf, 1)) {
 			dev_err(pp_example_dev->dev, "Failed to copy data");
 			return -EFAULT;
 		}
-
+		driver_buf[1] = 0;
+		dev_err(pp_example_dev->dev, "Have got %s\n", driver_buf);
 		pp_example_dev->buf_lock = true;
-		ret = rpmsg_send(pp_example_dev->rpmsg_dev, (void *)driver_buf,
+		ret = rpmsg_send(pp_example_dev->endpoint, (void *)driver_buf,
 				 DRIVER_BUF_SIZE*sizeof(char));
 		if (ret) {
 			dev_err(pp_example_dev->dev,
@@ -132,7 +147,7 @@ static const struct file_operations rpmsg_pru_parallel_fops = {
 };
 
 
-static void rpmsg_pru_parallel_example_cb(struct rpmsg_channel *rpmsg_dev,
+static int rpmsg_pru_parallel_example_cb(struct rpmsg_device *rpmsg_dev,
 					  void *data , int len , void *priv,
 					  u32 src )
 {
@@ -145,14 +160,14 @@ static void rpmsg_pru_parallel_example_cb(struct rpmsg_channel *rpmsg_dev,
 
 	if (pp_example_dev->buf_lock)
 		pp_example_dev->buf_lock = false;
+	return 0;
 }
-
 
 /*
  * driver probe function
  */
 
-static int rpmsg_pru_parallel_example_probe(struct rpmsg_channel *rpmsg_dev)
+static int rpmsg_pru_parallel_example_probe(struct rpmsg_device *rpmsg_dev)
 {
 	int ret;
 	struct rpmsg_pru_parallel_example_dev *pp_example_dev;
@@ -165,7 +180,6 @@ static int rpmsg_pru_parallel_example_probe(struct rpmsg_channel *rpmsg_dev)
 				      GFP_KERNEL);
 	if(!pp_example_dev)
 		return -ENOMEM;
-
 
 	minor_obtained = idr_alloc(&rpmsg_pru_parallel_example_minors,
 				   pp_example_dev, 0, PRU_MAX_DEVICES,
@@ -205,9 +219,6 @@ static int rpmsg_pru_parallel_example_probe(struct rpmsg_channel *rpmsg_dev)
 
 	return 0;
 
-
-
-
 fail_device_create:
 	cdev_del(&pp_example_dev->cdev);
 fail_cdev_init:
@@ -217,7 +228,7 @@ fail_idr_alloc:
 }
 
 
-static void rpmsg_pru_parallel_example_remove(struct rpmsg_channel *rpmsg_dev)
+static void rpmsg_pru_parallel_example_remove(struct rpmsg_device *rpmsg_dev)
 {
 	struct rpmsg_pru_parallel_example_dev *pp_example_dev;
 
@@ -228,7 +239,6 @@ static void rpmsg_pru_parallel_example_remove(struct rpmsg_channel *rpmsg_dev)
 	idr_remove(&rpmsg_pru_parallel_example_minors,
 		   MINOR(pp_example_dev->devt));
 }
-
 
 static const struct rpmsg_device_id
 	rpmsg_driver_pru_parallel_example_id_table[] = {
@@ -297,3 +307,4 @@ module_exit(rpmsg_parallel_example_exit);
 
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Zubeen Tolani <ZeekHuge - zeekhuge@gmail.com>");
+
